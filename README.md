@@ -43,6 +43,7 @@ Byte Offset = 4 bits
 Index       = 10 bits
 Tag         = 18 bits
 Address Format
+
 31                  14 13           4 3           0
 ┌─────────────────────┬──────────────┬──────────────┐
 │         TAG         │    INDEX     │ BYTE OFFSET  │
