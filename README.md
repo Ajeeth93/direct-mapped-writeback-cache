@@ -25,12 +25,13 @@ The primary goal of this project is to demonstrate practical skills in **RTL des
 | Block Offset | **4 bits** |
 | RTL Language | **SystemVerilog** |
 
-Cache Capacity
+## Cache Capacity
 1024 cache lines × 128 bits per line
 = 131,072 bits
 = 16,384 bytes
 = 16 KiB
-Address Decomposition
+
+## Address Decomposition
 
 For a 32-bit byte address and a 128-bit cache line:
 
@@ -39,37 +40,41 @@ For a 32-bit byte address and a 128-bit cache line:
 
 Therefore:
 
-Byte Offset = 4 bits
-Index       = 10 bits
-Tag         = 18 bits
-Address Format
+**Byte Offset** = 4 bits
+**Index**       = 10 bits
+**Tag**         = 18 bits
 
+**Address Format**
+```text
 31                  14 13           4 3           0
 ┌─────────────────────┬──────────────┬──────────────┐
 │         TAG         │    INDEX     │ BYTE OFFSET  │
 │       18 bits       │   10 bits    │    4 bits    │
 └─────────────────────┴──────────────┴──────────────┘
-Address Fields
-Tag [31:14]
+```
+**Address Fields**
 
-The 18-bit tag identifies which memory block is currently stored in the selected cache line.
+**Tag [31:14]**
 
-Index [13:4]
+The **18-bit tag** identifies which memory block is currently stored in the selected cache line.
 
-The 10-bit index selects one of the 1024 cache lines.
+**Index [13:4]**
 
-Byte Offset [3:0]
+The **10-bit index** selects one of the **1024 cache lines**.
 
-The 4-bit byte offset selects a byte within the 16-byte cache line.
+**Byte Offset [3:0]**
 
-Cache Organization
+The **4-bit byte offset** selects a byte within the **16-byte cache line**.
+
+## Cache Organization
 
 The cache contains three primary storage structures:
 
-Data Array — stores the 128-bit cache-line data.
-Tag/Metadata Array — stores the tag, valid bit, and dirty bit.
-Cache Controller — controls cache hits, misses, write-backs, and memory operations using an FSM.
-Cache Architecture
+**Data Array** — stores the 128-bit cache-line data.
+**Tag/Metadata Array** — stores the tag, valid bit, and dirty bit.
+**Cache Controller** — controls cache hits, misses, write-backs, and memory operations using an FSM.
+**Cache Architecture**
+```text
                            32-bit Address
                                 │
                                 ▼
@@ -119,22 +124,12 @@ Cache Architecture
                               │
                               ▼
                          CPU / Memory
-Cache Parameters
-Parameter	Value
-Address Width	32 bits
-Cache Capacity	16 KiB
-Number of Cache Lines	1024
-Cache Line Size	128 bits
-Cache Line Size	16 bytes
-Tag Width	18 bits
-Index Width	10 bits
-Byte Offset Width	4 bits
-Cache Organization	Direct-Mapped
-Write Policy	Write-Back
-Cache Line Structure
+```
+## Cache Line Structure
 
-Each cache line contains:
+Each cache line contains **128 bits of data** and associated metadata:
 
+```text
 ┌────────────────────────────────────────────────────┐
 │                     DATA                           │
 │                    128 bits                        │
@@ -144,27 +139,30 @@ Each cache line contains:
 │       TAG        │  VALID  │  DIRTY  │
 │     18 bits      │  1 bit  │  1 bit  │
 └──────────────────┴─────────┴─────────┘
+```
 
-The data array stores the actual cache-line contents, while the metadata array stores the tag and status information.
+## Cache Operation
 
-Read Operation
+**Read Operation**
 
-For a CPU read request:
+When the CPU performs a read:
 
-The CPU provides a 32-bit address.
-The address is divided into tag, index, and byte offset.
+The 32-bit address is received.
+The address is divided into **Tag, Index, and Byte Offset**.
 The index selects one of the 1024 cache lines.
 The stored tag is compared with the requested tag.
 The valid bit is checked.
-If the tag matches and the line is valid, a cache hit occurs.
-The requested byte is selected using the byte offset.
+If the tag matches and the line is valid, a **cache hit** occurs.
+The byte offset selects the requested byte.
 Data is returned to the CPU.
-CPU Read
-   │
-   ▼
-32-bit Address
-   │
-   ▼
+
+```text
+         CPU Read
+             │
+             ▼
+      32-bit Address
+             │
+             ▼
 ┌─────────────────────────┐
 │ Tag / Index / Offset    │
 └────────────┬────────────┘
@@ -184,9 +182,10 @@ CPU Read
        │           │
        ▼           ▼
       CPU       Memory Access
-Write Operation
+```
+**Write Operation**
 
-This cache uses a write-back policy.
+This cache uses a **write-back policy**.
 
 When a write hits in the cache:
 
@@ -196,6 +195,8 @@ If the tag matches and the valid bit is set, a write hit occurs.
 The cache data is updated.
 The dirty bit is set to 1.
 Main memory is not immediately updated.
+
+```text
 CPU Write
     │
     ▼
@@ -212,7 +213,9 @@ Update Cache Data
     │
     ▼
 Dirty Bit = 1
-Write-Back Operation
+```
+
+**Write-Back Operation**
 
 When a dirty cache line must be replaced, the existing data must first be written back to main memory.
 
@@ -242,7 +245,8 @@ When a dirty cache line must be replaced, the existing data must first be writte
                  │
                  ▼
            Complete Request
-Cache Miss Handling
+
+**Cache Miss Handling**
 
 When a cache miss occurs, the controller performs the following operations:
 
@@ -257,7 +261,8 @@ When a cache miss occurs, the controller performs the following operations:
 9. Set valid bit
 10. Clear dirty bit
 11. Complete CPU request
-Cache Controller FSM
+
+**Cache Controller FSM**
 
 The cache controller manages the cache operations using a finite state machine.
 
@@ -308,15 +313,17 @@ A typical state sequence is:
                               ┌─────────────┐
                               │  COMPLETE   │
                               └─────────────┘
-RTL Modules
+**RTL Modules**
 
 The RTL is divided into separate SystemVerilog modules to keep the design modular and easier to debug.
 
+```text
 rtl/
 ├── cache_top.sv
 ├── cache_controller.sv
 ├── cache_data.sv
 └── cache_tag.sv
+```
 cache_top.sv
 
 Top-level module that connects the cache data array, tag/metadata array, controller, CPU interface, and memory interface.
@@ -353,7 +360,9 @@ Index Width      : 10 bits
 Offset Width     : 4 bits
 Write Policy     : Write-Back
 Language         : SystemVerilog
-Repository Structure
+
+## Repository Structure
+```text
 direct-mapped-writeback-cache/
 │
 ├── README.md
@@ -366,6 +375,7 @@ direct-mapped-writeback-cache/
 │
 └── tb/
     └── cache_tb.sv
-Author
+```
+## Author
 
 Ajeeth93
