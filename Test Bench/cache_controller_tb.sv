@@ -1,847 +1,266 @@
 import cache_def::*;
 
 module cache_controller_tb;
+    timeunit 1ns;
+    timeprecision 1ps;
 
-    // Clock and reset
+    localparam int MEM_LATENCY  = 3;
+    localparam int RANDOM_TESTS = 1000;
 
-    logic clk;
-    logic rst;
+    bit clk;
+    bit rst;
 
-    // CPU -> Cache
-
-    cpu_req_type cpu_req;
-
-    // Cache -> CPU
-
+    cpu_req_type    cpu_req;
     cpu_result_type cpu_res;
+    mem_req_type    mem_req;
+    mem_data_type   mem_data;
 
-    // Cache -> Memory
+    dm_cache_fsm dut (.*);
 
-    mem_req_type mem_req;
+    always #5 clk = ~clk;
 
-    // Memory -> Cache
+    // ------------------------------------------------------------
+    // main memory model
+    // takes a request when mem_req.valid is high, waits MEM_LATENCY
+    // cycles and then pulses mem_data.ready for one cycle
+    // ------------------------------------------------------------
 
-    mem_data_type mem_data;
+    bit [127:0] mem [bit [27:0]];      // line address -> line data
 
-    // Testbench bookkeeping
+    int         mem_reads;
+    int         mem_writes;
+    bit [31:0]  last_wb_addr;
+    bit [127:0] last_wb_data;
 
-    integer test_count;
-    integer pass_count;
-    integer fail_count;
+    bit         busy;
+    int         wait_cnt;
+    bit         pend_rw;
+    bit [27:0]  pend_line;
 
-    // Memory model storage
-    //
-    // This is a simple behavioral memory model.
-    //
-    // It remembers the last write-back so that we can verify
-    // that the cache actually wrote the dirty cache line back.
+    // what memory holds at an address that was never written
+    function automatic bit [31:0] init_word(bit [31:0] addr);
+        return {addr[31:2], 2'b00} ^ 32'hC0DE_0000;
+    endfunction
 
-    logic [31:0]  last_writeback_addr;
-    logic [127:0] last_writeback_data;
+    function automatic bit [127:0] read_line(bit [27:0] line);
+        bit [127:0] d;
+        if (mem.exists(line))
+            return mem[line];
+        for (int w = 0; w < 4; w++)
+            d[w*32 +: 32] = init_word({line, w[1:0], 2'b00});
+        return d;
+    endfunction
 
-    integer writeback_count;
-    integer read_request_count;
-
-    // Clock generation
-    // 10 ns period
-
-    initial begin
-        clk = 1'b0;
-        forever #5 clk = ~clk;
-    end
-
-    // Device Under Test
-
-    dm_cache_fsm dut (
-
-        .clk      (clk),
-        .rst      (rst),
-
-        .cpu_req  (cpu_req),
-        .cpu_res  (cpu_res),
-
-        .mem_req  (mem_req),
-        .mem_data (mem_data)
-
-    );
-
-    // Simple memory model
-    //
-    // The cache requests an entire 128-bit cache line.
-    //
-    // For READ:
-    //     memory waits one clock cycle
-    //     then returns a 128-bit cache line.
-    //
-    // For WRITE:
-    //     memory records the write-back
-    //     then asserts ready for one cycle.
-
-    always_ff @(posedge clk) begin
-
-        // Default:
-        // ready is normally LOW.
+    always @(posedge clk) begin
         mem_data.ready <= 1'b0;
 
-
-        if (mem_req.valid) begin
-
-            // ====================================================
-            // MEMORY WRITE
-            // ====================================================
+        if (rst) begin
+            busy <= 1'b0;
+        end
+        else if (busy) begin
+            if (wait_cnt == 0) begin
+                busy           <= 1'b0;
+                mem_data.ready <= 1'b1;
+                if (!pend_rw)
+                    mem_data.data <= read_line(pend_line);
+            end
+            else
+                wait_cnt <= wait_cnt - 1;
+        end
+        else if (mem_req.valid) begin
+            busy      <= 1'b1;
+            wait_cnt  <= MEM_LATENCY - 1;
+            pend_rw   <= mem_req.rw;
+            pend_line <= mem_req.addr[31:4];
 
             if (mem_req.rw) begin
-
-                $display(
-                    "[MEM] WRITE-BACK request: addr = %08h, data = %032h, time = %0t",
-                    mem_req.addr,
-                    mem_req.data,
-                    $time
-                );
-
-                last_writeback_addr <= mem_req.addr;
-                last_writeback_data <= mem_req.data;
-
-                writeback_count <= writeback_count + 1;
-
-                // Acknowledge write-back
-                mem_data.ready <= 1'b1;
-                mem_data.data  <= 128'b0;
-
+                mem[mem_req.addr[31:4]] = mem_req.data;
+                last_wb_addr = mem_req.addr;
+                last_wb_data = mem_req.data;
+                mem_writes++;
             end
-
-
-            // ====================================================
-            // MEMORY READ
-            // ====================================================
-
-            else begin
-
-                $display(
-                    "[MEM] READ request: addr = %08h, time = %0t",
-                    mem_req.addr,
-                    $time
-                );
-
-                read_request_count <= read_request_count + 1;
-
-                // ------------------------------------------------
-                // Return a deterministic cache line based on
-                // requested line address.
-                // ------------------------------------------------
-
-                case (mem_req.addr)
-
-                    // ------------------------------------------------
-                    // Line at address 0x00000000
-                    //
-                    // word 0 = AAAAAAAA
-                    // word 1 = BBBBBBBB
-                    // word 2 = CCCCCCCC
-                    // word 3 = DDDDDDDD
-                    // ------------------------------------------------
-
-                    32'h0000_0000: begin
-
-                        mem_data.data <= {
-                            32'hDDDD_DDDD,
-                            32'hCCCC_CCCC,
-                            32'hBBBB_BBBB,
-                            32'hAAAA_AAAA
-                        };
-
-                    end
-
-
-                    // ------------------------------------------------
-                    // Line at address 0x00001000
-                    // ------------------------------------------------
-
-                    32'h0000_1000: begin
-
-                        mem_data.data <= {
-                            32'h4444_4444,
-                            32'h3333_3333,
-                            32'h2222_2222,
-                            32'h1111_1111
-                        };
-
-                    end
-
-
-                    // ------------------------------------------------
-                    // Line at address 0x00004000
-                    // ------------------------------------------------
-
-                    32'h0000_4000: begin
-
-                        mem_data.data <= {
-                            32'h8888_8888,
-                            32'h7777_7777,
-                            32'h6666_6666,
-                            32'h5555_5555
-                        };
-
-                    end
-
-
-                    // ------------------------------------------------
-                    // Any other memory address
-                    // ------------------------------------------------
-
-                    default: begin
-
-                        mem_data.data <= {
-                            mem_req.addr,
-                            mem_req.addr,
-                            mem_req.addr,
-                            mem_req.addr
-                        };
-
-                    end
-
-                endcase
-
-
-                // Tell cache that data is available
-                mem_data.ready <= 1'b1;
-
-            end
-
+            else
+                mem_reads++;
         end
-
     end
 
+    // ------------------------------------------------------------
+    // reference model of what the cpu should read back
+    // ------------------------------------------------------------
 
-    // ============================================================
-    // Utility task:
-    // Initialize CPU request.
-    // ============================================================
+    bit [31:0] ref_mem [bit [31:0]];   // word address -> last written value
 
-    task automatic clear_cpu_request();
+    function automatic bit [31:0] expected(bit [31:0] addr);
+        bit [31:0] a = {addr[31:2], 2'b00};
+        return ref_mem.exists(a) ? ref_mem[a] : init_word(a);
+    endfunction
 
-        begin
+    // ------------------------------------------------------------
+    // cpu side tasks
+    // the request is held until ready is seen, then dropped
+    // ------------------------------------------------------------
 
-            cpu_req.addr  = 32'b0;
-            cpu_req.data  = 32'b0;
-            cpu_req.rw    = 1'b0;
-            cpu_req.valid = 1'b0;
+    task automatic cpu_access(input bit rw, input bit [31:0] addr,
+                              input bit [31:0] wdata, output bit [31:0] rdata);
+        int cycles = 0;
 
-        end
+        @(negedge clk);
+        cpu_req.addr  = addr;
+        cpu_req.data  = wdata;
+        cpu_req.rw    = rw;
+        cpu_req.valid = 1'b1;
 
-    endtask
-
-
-    // ============================================================
-    // Utility task:
-    // Send CPU READ request.
-    //
-    // The request is held valid until cpu_res.ready.
-    // ============================================================
-
-    task automatic cpu_read(
-        input logic [31:0] addr,
-        input logic [31:0] expected_data
-    );
-
-        integer timeout;
-
-        begin
-
-            test_count = test_count + 1;
-
-            $display("");
-            $display("============================================================");
-            $display("TEST %0d: CPU READ  addr = %08h", test_count, addr);
-            $display("Expected data = %08h", expected_data);
-            $display("============================================================");
-
-
-            // Drive request
+        do begin
             @(negedge clk);
-
-            cpu_req.addr  = addr;
-            cpu_req.data  = 32'b0;
-            cpu_req.rw    = 1'b0;
-            cpu_req.valid = 1'b1;
-
-
-            // Wait for cache response
-            timeout = 0;
-
-            while (!cpu_res.ready && timeout < 100) begin
-
-                @(posedge clk);
-
-                timeout = timeout + 1;
-
+            cycles++;
+            if (cycles > 100) begin
+                $display("ERROR: timeout waiting for ready, addr %h", addr);
+                $finish;
             end
+        end while (!cpu_res.ready);
 
-
-            // Timeout check
-            if (timeout >= 100) begin
-
-                $error(
-                    "READ TIMEOUT: address = %08h",
-                    addr
-                );
-
-                fail_count = fail_count + 1;
-
-            end
-
-            else begin
-
-                // Check returned data
-                if (cpu_res.data === expected_data) begin
-
-                    $display(
-                        "[PASS] READ addr=%08h data=%08h",
-                        addr,
-                        cpu_res.data
-                    );
-
-                    pass_count = pass_count + 1;
-
-                end
-
-                else begin
-
-                    $error(
-                        "[FAIL] READ addr=%08h expected=%08h actual=%08h",
-                        addr,
-                        expected_data,
-                        cpu_res.data
-                    );
-
-                    fail_count = fail_count + 1;
-
-                end
-
-            end
-
-
-            // Remove request
-            @(negedge clk);
-
-            clear_cpu_request();
-
-        end
-
+        rdata = cpu_res.data;
+        @(posedge clk);
+        #1 cpu_req.valid = 1'b0;
     endtask
 
-    // Utility task:
-    // Send CPU WRITE request.
-    //
-    // The request is held valid until cpu_res.ready.
-
-    task automatic cpu_write(
-        input logic [31:0] addr,
-        input logic [31:0] data
-    );
-
-        integer timeout;
-
-        begin
-
-            test_count = test_count + 1;
-
-            $display("");
-            $display("============================================================");
-            $display("TEST %0d: CPU WRITE addr = %08h", test_count, addr);
-            $display("Write data = %08h", data);
-            $display("============================================================");
-
-
-            @(negedge clk);
-
-            cpu_req.addr  = addr;
-            cpu_req.data  = data;
-            cpu_req.rw    = 1'b1;
-            cpu_req.valid = 1'b1;
-
-
-            timeout = 0;
-
-            while (!cpu_res.ready && timeout < 100) begin
-
-                @(posedge clk);
-
-                timeout = timeout + 1;
-
-            end
-
-
-            if (timeout >= 100) begin
-
-                $error(
-                    "WRITE TIMEOUT: address = %08h",
-                    addr
-                );
-
-                fail_count = fail_count + 1;
-
-            end
-
-            else begin
-
-                $display(
-                    "[PASS] WRITE completed addr=%08h data=%08h",
-                    addr,
-                    data
-                );
-
-                pass_count = pass_count + 1;
-
-            end
-
-
-            @(negedge clk);
-
-            clear_cpu_request();
-
-        end
-
+    task automatic cpu_write(input bit [31:0] addr, input bit [31:0] data);
+        bit [31:0] unused;
+        cpu_access(1'b1, addr, data, unused);
+        ref_mem[{addr[31:2], 2'b00}] = data;
     endtask
 
-    // Check that no memory request is generated.
-    //
-    // Used for cache HIT tests.
-
-    task automatic check_no_memory_request(
-        input integer cycles
-    );
-
-        integer i;
-
-        begin
-
-            for (i = 0; i < cycles; i = i + 1) begin
-
-                @(posedge clk);
-
-                if (mem_req.valid) begin
-
-                    $error(
-                        "[FAIL] Unexpected memory request at time %0t",
-                        $time
-                    );
-
-                    fail_count = fail_count + 1;
-
-                end
-
-            end
-
-        end
-
+    task automatic cpu_read(input bit [31:0] addr, output bit ok);
+        bit [31:0] got;
+        bit [31:0] exp;
+        cpu_access(1'b0, addr, 32'h0, got);
+        exp = expected(addr);
+        ok  = (got == exp);
+        if (!ok)
+            $display("  read %h: got %h, expected %h", addr, got, exp);
     endtask
 
-    // Check write-back information
+    // ------------------------------------------------------------
+    // checking
+    // ------------------------------------------------------------
 
-    task automatic check_writeback(
-        input logic [31:0] expected_addr,
-        input logic [127:0] expected_data
-    );
+    int checks;
+    int errors;
+    int r0, w0;
 
-        begin
-
-            if (last_writeback_addr === expected_addr) begin
-
-                $display(
-                    "[PASS] Write-back address = %08h",
-                    last_writeback_addr
-                );
-
-                pass_count = pass_count + 1;
-
-            end
-
-            else begin
-
-                $error(
-                    "[FAIL] Write-back address: expected=%08h actual=%08h",
-                    expected_addr,
-                    last_writeback_addr
-                );
-
-                fail_count = fail_count + 1;
-
-            end
-
-
-            if (last_writeback_data === expected_data) begin
-
-                $display(
-                    "[PASS] Write-back data = %032h",
-                    last_writeback_data
-                );
-
-                pass_count = pass_count + 1;
-
-            end
-
-            else begin
-
-                $error(
-                    "[FAIL] Write-back data:\nexpected=%032h\nactual  =%032h",
-                    expected_data,
-                    last_writeback_data
-                );
-
-                fail_count = fail_count + 1;
-
-            end
-
+    task automatic check(input bit cond, input string msg);
+        checks++;
+        if (cond)
+            $display("PASS  %s", msg);
+        else begin
+            errors++;
+            $display("FAIL  %s", msg);
         end
-
     endtask
 
+    function automatic void mark();
+        r0 = mem_reads;
+        w0 = mem_writes;
+    endfunction
 
-    // Main test sequence
+    function automatic bit traffic(int reads, int writes);
+        return (mem_reads - r0 == reads) && (mem_writes - w0 == writes);
+    endfunction
+
+    // A and B map to the same cache line (index 1) with different tags,
+    // C maps to index 2
+    localparam bit [31:0] A = 32'h0000_0010;
+    localparam bit [31:0] B = 32'h0000_4010;
+    localparam bit [31:0] C = 32'h0000_0020;
 
     initial begin
+        bit ok;
+        bit ok2;
+        bit [31:0] addr;
+        int rand_errors;
 
-        // Initialize bookkeeping
-
-        test_count = 0;
-        pass_count = 0;
-        fail_count = 0;
-
-        writeback_count    = 0;
-        read_request_count = 0;
-
-        last_writeback_addr = 32'b0;
-        last_writeback_data = 128'b0;
-
-        mem_data = '0;
-
-        clear_cpu_request();
-
-
-        // RESET
-
-        $display("");
-        $display("============================================================");
-        $display("RESET");
-        $display("============================================================");
-
+        cpu_req = '{default: 0};
         rst = 1'b1;
-
-        repeat (4) @(posedge clk);
-
-        rst = 1'b0;
-
-        repeat (2) @(posedge clk);
-
-        // TEST 1
-        //
-        // Read address 0x00000000.
-        //
-        // Cache starts empty, so this must be a READ MISS.
-        //
-        // Memory returns:
-        //
-        // [127:96] = DDDDDDDD
-        // [95:64]  = CCCCCCCC
-        // [63:32]  = BBBBBBBB
-        // [31:0]   = AAAAAAAA
-
-        cpu_read(
-            32'h0000_0000,
-            32'hAAAA_AAAA
-        );
-
-        // TEST 2
-        //
-        // Read word at +4.
-        //
-        // This must be a CACHE HIT.
-        // No memory request should occur.
-
-        cpu_read(
-            32'h0000_0004,
-            32'hBBBB_BBBB
-        );
-
-        // TEST 3
-        //
-        // Read word at +8.
-        //
-        // Cache HIT.
-
-        cpu_read(
-            32'h0000_0008,
-            32'hCCCC_CCCC
-        );
-
-        // TEST 4
-        //
-        // Read word at +12.
-        //
-        // Cache HIT.
-
-        cpu_read(
-            32'h0000_000C,
-            32'hDDDD_DDDD
-        );
-
-        // TEST 5
-        //
-        // WRITE HIT to word 0.
-        //
-        // Change AAAAAAAA -> 12345678.
-        //
-        // Cache line should become dirty.
-
-        cpu_write(
-            32'h0000_0000,
-            32'h1234_5678
-        );
-
-        // TEST 6
-        //
-        // Read back word 0.
-        //
-        // Should return newly written value.
-        // No memory transaction should be required.
-
-        cpu_read(
-            32'h0000_0000,
-            32'h1234_5678
-        );
-
-        // TEST 7
-        //
-        // Write hit to word 1.
-
-        cpu_write(
-            32'h0000_0004,
-            32'h8765_4321
-        );
-
-        // TEST 8
-        //
-        // Read back word 1.
-
-        cpu_read(
-            32'h0000_0004,
-            32'h8765_4321
-        );
-
-        // TEST 9
-        //
-        // Write hit to word 2.
-
-        cpu_write(
-            32'h0000_0008,
-            32'hDEAD_BEEF
-        );
-
-        // TEST 10
-        //
-        // Read back word 2.
-
-        cpu_read(
-            32'h0000_0008,
-            32'hDEAD_BEEF
-        );
-
-        // TEST 11
-        //
-        // Write hit to word 3.
-
-        cpu_write(
-            32'h0000_000C,
-            32'hCAFE_BABE
-        );
-
-        // TEST 12
-        //
-        // Read back word 3.
-
-        cpu_read(
-            32'h0000_000C,
-            32'hCAFE_BABE
-        );
-
-        // At this point cache line 0 should contain:
-        //
-        // [127:96] = CAFEBABE
-        // [95:64]  = DEADBEEF
-        // [63:32]  = 87654321
-        // [31:0]   = 12345678
-        //
+        repeat (3) @(posedge clk);
+        #1 rst = 1'b0;
 
         $display("");
-        $display("Expected dirty cache line:");
-        $display(
-            "CAFEBABE_DEADBEEF_87654321_12345678"
-        );
+        $display("---- directed tests ----");
 
-        // TEST 13
-        //
-        // CLEAN MISS.
-        //
-        // Address 0x00001000:
-        //
-        // tag   = 0
-        // index = 0x100
-        //
-        // This is a different cache index from 0x00000000.
-        //
-        // Therefore it should NOT evict the dirty line at index 0.
+        mark(); cpu_read(A, ok);
+        check(ok && traffic(1, 0), "read miss on empty cache fetches the line");
 
-        cpu_read(
-            32'h0000_1000,
-            32'h1111_1111
-        );
+        mark(); cpu_read(A + 4, ok);
+        check(ok && traffic(0, 0), "read hit, no memory access");
 
-        // Test remaining words of second line
+        mark(); cpu_write(A + 8, 32'h1111_2222);
+        check(traffic(0, 0), "write hit stays in the cache");
 
-        cpu_read(
-            32'h0000_1004,
-            32'h2222_2222
-        );
+        mark(); cpu_read(A + 8, ok);
+        check(ok && traffic(0, 0), "read back the word written on a hit");
 
-        cpu_read(
-            32'h0000_1008,
-            32'h3333_3333
-        );
+        mark(); cpu_write(C + 4, 32'h3333_4444);
+        check(traffic(1, 0), "write miss on empty line fetches the line");
 
-        cpu_read(
-            32'h0000_100C,
-            32'h4444_4444
-        );
+        mark(); cpu_read(C + 4, ok); cpu_read(C, ok2);
+        check(ok && ok2 && traffic(0, 0), "write miss merged the word into the fetched line");
 
-        // TEST 14
-        //
-        // DIRTY MISS.
-        //
-        // Address 0x00004000:
-        //
-        // 0x00000000:
-        //     tag   = 0
-        //     index = 0
-        //
-        // 0x00004000:
-        //     tag   = 1
-        //     index = 0
-        //
-        // SAME INDEX
-        // DIFFERENT TAG
-        //
-        // Therefore the dirty line at index 0 must be written back.
+        mark(); cpu_read(B, ok);
+        check(ok && traffic(1, 1), "miss on a dirty line writes it back, then fetches");
+        check(last_wb_addr[31:4] == A[31:4] && last_wb_data[95:64] == 32'h1111_2222,
+              "write-back has the right address and data");
 
-        cpu_read(
-            32'h0000_4000,
-            32'h5555_5555
-        );
+        mark(); cpu_read(A + 8, ok);
+        check(ok && traffic(1, 0), "miss on a clean line, written data comes back from memory");
 
-        // Check that exactly one write-back occurred.
+        mark(); cpu_write(B + 12, 32'h5555_6666);
+        check(traffic(1, 0), "write miss with a clean victim, no write-back");
 
-        if (writeback_count == 1) begin
+        mark(); cpu_read(A, ok);
+        check(ok && traffic(1, 1), "write-miss line is dirty and gets written back");
+        check(last_wb_addr[31:4] == B[31:4] && last_wb_data[127:96] == 32'h5555_6666,
+              "write-back has the right address and data");
 
-            $display(
-                "[PASS] Exactly one write-back occurred."
-            );
-
-            pass_count = pass_count + 1;
-
-        end
-
-        else begin
-
-            $error(
-                "[FAIL] Expected 1 write-back, got %0d",
-                writeback_count
-            );
-
-            fail_count = fail_count + 1;
-
-        end
-
-
-        // Verify write-back address.
-        //
-        // Old line:
-        //
-        // tag = 0
-        // index = 0
-        //
-        // Therefore write-back address = 0x00000000.
-
-        check_writeback(
-            32'h0000_0000,
-
-            {
-                32'hCAFE_BABE,
-                32'hDEAD_BEEF,
-                32'h8765_4321,
-                32'h1234_5678
-            }
-        );
-
-
-        // TEST 15
-        //
-        // Verify words in newly allocated 0x4000 line.
-
-        cpu_read(
-            32'h0000_4004,
-            32'h6666_6666
-        );
-
-        cpu_read(
-            32'h0000_4008,
-            32'h7777_7777
-        );
-
-        cpu_read(
-            32'h0000_400C,
-            32'h8888_8888
-        );
-
-        // Final statistics
-
-        #20;
+        mark(); cpu_read(B + 12, ok);
+        check(ok && traffic(1, 0), "evicted write is read back from memory");
 
         $display("");
+        $display("---- random tests (%0d accesses) ----", RANDOM_TESTS);
+
+        // 4 tags x 4 indexes x 4 words, so plenty of hits, misses and evictions
+        rand_errors = 0;
+        mark();
+        for (int i = 0; i < RANDOM_TESTS; i++) begin
+            addr = '0;
+            addr[15:14] = $urandom_range(0, 3);
+            addr[5:4]   = $urandom_range(0, 3);
+            addr[3:2]   = $urandom_range(0, 3);
+
+            if ($urandom_range(0, 1))
+                cpu_write(addr, $urandom);
+            else begin
+                cpu_read(addr, ok);
+                if (!ok) rand_errors++;
+            end
+        end
+        $display("      memory reads: %0d, write-backs: %0d", mem_reads - r0, mem_writes - w0);
+        check(rand_errors == 0, "random reads all match the reference model");
+
         $display("");
-        $display("============================================================");
-        $display("                 CACHE TEST SUMMARY");
-        $display("============================================================");
-        $display("Tests performed : %0d", test_count);
-        $display("Passed          : %0d", pass_count);
-        $display("Failed          : %0d", fail_count);
-        $display("Memory reads    : %0d", read_request_count);
-        $display("Write-backs     : %0d", writeback_count);
-        $display("============================================================");
-
-
-        if (fail_count == 0) begin
-
-            $display("");
-            $display("****************************************");
-            $display("*** ALL CACHE TESTS PASSED ************");
-            $display("****************************************");
-            $display("");
-
-        end
-
-        else begin
-
-            $display("");
-            $display("****************************************");
-            $display("*** CACHE TEST FAILED *****************");
-            $display("****************************************");
-            $display("");
-
-        end
-
-
+        $display("==========================================");
+        $display("  checks: %0d   passed: %0d   failed: %0d", checks, checks - errors, errors);
+        if (errors == 0)
+            $display("  ALL TESTS PASSED");
+        else
+            $display("  SOME TESTS FAILED");
+        $display("==========================================");
         $finish;
+    end
 
+    initial begin
+        #10ms;
+        $display("ERROR: simulation timeout");
+        $finish;
     end
 
 endmodule
